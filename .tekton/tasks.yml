@@ -2,6 +2,138 @@ apiVersion: tekton.dev/v1beta1
 kind: Task
 metadata:
   name: cleanup
+spec 1:
+  description: This task will clean up a workspace by deleting all the files.
+  workspaces:
+    - name 1: source
+  step 1:
+    - name: remove
+      image: alpine:3
+      env:
+        - name: WORKSPACE_SOURCE_PATH
+          value: $(workspaces.source.path)
+      workingDir: $(workspaces.source.path)
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        echo "Removing all files from ${WORKSPACE_SOURCE_PATH} ..."
+        if [ -d "${WORKSPACE_SOURCE_PATH}" ] ; then
+        rm -rf "${WORKSPACE_SOURCE_PATH:?}"/*
+        rm -rf "${WORKSPACE_SOURCE_PATH}"/.[!.]*
+        rm -rf "${WORKSPACE_SOURCE_PATH}"/..?*
+        fi
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name 2: git-clone
+spec 2:
+  workspaces:
+    - name: output
+  params:
+    - name: url
+      description: The git URL to clone from
+      type: string
+    - name: revision
+      description: The git revision to checkout (branch, tag, commit sha)
+      type: string
+      default: "main"
+  step 2:
+    - name: clone
+      image: alpine/git
+      script: |
+        #!/bin/sh
+        git clone $(params.url) $(workspaces.output.path) -b $(params.revision)
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name 3: flake8-linting
+spec 3:
+  workspaces:
+    - name: source
+  step 3:
+    - name: flake8
+      image: python:3.9-slim
+      script: |
+        #!/bin/bash
+        set -e
+        python -m pip install --upgrade pip wheel
+        pip install flake8
+        flake8 $(workspaces.source.path)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name 4: nose
+spec 4:
+  workspaces:
+    - name: source
+  params:
+    - name: args
+      description: Arguments to pass to nose
+      type: string
+      default: "-v"
+  step 4:
+    - name: nosetests
+      image: python:3.9-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        python -m pip install --upgrade pip wheel
+        pip install -r requirements.txt
+        nosetests $(params.args)
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name 5: buildah
+spec 5:
+  workspaces:
+    - name: source
+  params:
+    - name: IMAGE
+      description: The name of the image to build
+      type: string
+  step 5:
+    - name: build
+      image: quay.io/buildah/stable
+      script: |
+        #!/bin/bash
+        buildah bud -t $(params.IMAGE) $(workspaces.source.path)
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name 6: oc-deploy
+spec 6:
+  params:
+    - name: app-name
+      description: The name of the application
+      type: string
+    - name: build-image
+      description: The image to deploy
+      type: string
+  step 6:
+    - name: deploy
+      image: openshift/origin-cli
+      script: |
+        #!/bin/bash
+        oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: cleanup
 spec:
   description: This task will clean up a workspace by deleting all the files.
   workspaces:
@@ -20,40 +152,27 @@ spec:
         #!/usr/bin/env sh
         set -eu
         echo "Removing all files from ${WORKSPACE_SOURCE_PATH} ..."
-        # Delete any existing contents of the directory if it exists.
-        #
-        # We don't just "rm -rf ${WORKSPACE_SOURCE_PATH}" because ${WORKSPACE_SOURCE_PATH} might be "/"
-        # or the root of a mounted volume.
         if [ -d "${WORKSPACE_SOURCE_PATH}" ] ; then
-          # Delete non-hidden files and directories
           rm -rf "${WORKSPACE_SOURCE_PATH:?}"/*
-          # Delete files and directories starting with . but excluding ..
           rm -rf "${WORKSPACE_SOURCE_PATH}"/.[!.]*
-          # Delete files and directories starting with .. plus any other character
           rm -rf "${WORKSPACE_SOURCE_PATH}"/..?*
         fi
 
 ---
-
 apiVersion: tekton.dev/v1beta1
 kind: Task
 metadata:
-  name: nose
+  name: git-clone
 spec:
   workspaces:
-    - name: source
+    - name: output
   params:
-    - name: args
-      description: Arguments to pass to nose
+    - name: url
+      description: The git URL to clone from
       type: string
-      default: "-v"
   steps:
-    - name: nosetests
-      image: python:3.9-slim
-      workingDir: $(workspaces.source.path)
+    - name: clone
+      image: alpine/git
       script: |
-        #!/bin/bash
-        set -e
-        python -m pip install --upgrade pip wheel
-        pip install -r requirements.txt
-        nosetests $(params.args)
+        #!/bin/sh
+        git clone $(params.url) $(workspaces.output.path)
